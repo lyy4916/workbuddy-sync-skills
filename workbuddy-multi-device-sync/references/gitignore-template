@@ -1,0 +1,54 @@
+# === Machine-specific, do NOT sync ===
+binaries/
+sessions/
+logs/
+shell-snapshots/
+app/
+blobs/
+clipboard-images/
+file-history/
+audit-log/
+projects/
+local_storage/
+artifact-index/
+claw-state/
+plans/
+tasks/
+connectors/
+connectors-marketplace/
+plugins/
+plugin-marketplace-state-new/
+skills-marketplace/
+extensions/
+inspiration/
+memory/
+
+# === SQLite database (concurrent sync corrupts) ===
+workbuddy.db
+workbuddy.db-*
+
+# === Machine-specific config (localhost ports differ) ===
+.mcp.json
+mcp-approvals.json
+ioa-im-override.json
+argv.json
+
+# === Credentials (each machine logs in independently) ===
+credentials/
+
+# === Runtime state / logs (machine-specific) ===
+traces/
+expert-history.json
+user-state.json
+workspace-state.json
+usage-log.json
+.connectors-marketplace.meta.json
+.DS_Store
+
+# === Auto-sync daemon state ===
+.auto-sync.log
+.auto-sync.stdout
+.auto-sync.stderr
+.last-auto-sync
+.sync-daemon.pid
+start-sync-daemon.sh
