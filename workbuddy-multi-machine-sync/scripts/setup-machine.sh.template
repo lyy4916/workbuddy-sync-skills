@@ -1,0 +1,245 @@
+#!/bin/bash
+#
+# WorkBuddy Nth Machine Setup Script (Multi-Machine Sync)
+#
+# TEMPLATE — replace these placeholders before use:
+#   <REMOTE_NAME>     → "origin" for GitHub, "icloud" for iCloud
+#   <REMOTE_URL>      → GitHub repo URL or iCloud bare repo path
+#   <GITHUB_USERNAME> → GitHub username (only for GitHub backend)
+#   <GITHUB_TOKEN>    → GitHub token (only for GitHub backend)
+#
+# Usage (on any new machine):
+#   1. Install WorkBuddy, launch once, then quit (to create ~/.workbuddy/)
+#   2. Run: bash wb-setup-machine.sh
+#
+# The script will:
+#   - Ask for a machine name (or use hostname as default)
+#   - Back up existing config
+#   - Pull from remote
+#   - Register itself in machines.json
+#   - Install auto-sync daemon
+#   - Start syncing
+#
+
+set -e
+
+REMOTE_NAME="<REMOTE_NAME>"
+REMOTE_URL="<REMOTE_URL>"
+GITHUB_USERNAME="<GITHUB_USERNAME>"
+GITHUB_TOKEN="<GITHUB_TOKEN>"
+BRANCH="main"
+
+WB_DIR="$HOME/.workbuddy"
+
+# Check ~/.workbuddy exists
+if [ ! -d "$WB_DIR" ]; then
+  echo "ERROR: ~/.workbuddy does not exist"
+  echo "Install WorkBuddy first, launch it once, then quit and run this script"
+  exit 1
+fi
+
+# === Step 1: Get machine name ===
+DEFAULT_NAME=$(hostname -s 2>/dev/null || hostname)
+echo ""
+echo ">> Registering new machine"
+echo ">> Suggested name: $DEFAULT_NAME"
+echo -n ">> Enter machine name (or press Enter for default): "
+read -r MACHINE_NAME
+MACHINE_NAME="${MACHINE_NAME:-$DEFAULT_NAME}"
+
+# Check if name contains spaces
+if echo "$MACHINE_NAME" | grep -q " "; then
+  echo "ERROR: Machine name must not contain spaces."
+  echo "Use hyphens instead, e.g. 'mac-studio' not 'mac studio'"
+  exit 1
+fi
+
+echo ">> Machine name: $MACHINE_NAME"
+echo "$MACHINE_NAME" > "$WB_DIR/.machine-name"
+
+# === Step 2: Backup existing config ===
+if [ -f "$WB_DIR/SOUL.md" ] || [ -f "$WB_DIR/MEMORY.md" ]; then
+  BACKUP_DIR="$WB_DIR.backup.$(date +%Y%m%d%H%M%S)"
+  echo ">> Backing up existing config to $BACKUP_DIR ..."
+  mkdir -p "$BACKUP_DIR"
+  for f in SOUL.md IDENTITY.md USER.md MEMORY.md mcp.json settings.json skills; do
+    if [ -e "$WB_DIR/$f" ]; then
+      cp -r "$WB_DIR/$f" "$BACKUP_DIR/"
+    fi
+  done
+  echo ">> Backup complete"
+fi
+
+# === Step 3: Configure git ===
+if [ -z "$(git config --global user.name)" ]; then
+  git config --global user.name "$(whoami)"
+  git config --global user.email "$(whoami)@workbuddy.local"
+  git config --global init.defaultBranch main
+fi
+
+# === Step 4: Store credentials (GitHub only) ===
+if [ "$REMOTE_NAME" = "origin" ] && [ -n "$GITHUB_TOKEN" ]; then
+  echo "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com" > "$HOME/.git-credentials"
+  chmod 600 "$HOME/.git-credentials"
+  git config --global credential.helper store
+  echo ">> GitHub credentials stored"
+fi
+
+# === Step 5: Pull from remote ===
+cd "$WB_DIR"
+
+if [ -d ".git" ]; then
+  echo ">> Git repo exists, switching remote..."
+  git remote remove "$REMOTE_NAME" 2>/dev/null || true
+  git remote remove origin 2>/dev/null || true
+  git remote remove icloud 2>/dev/null || true
+  git remote add "$REMOTE_NAME" "$REMOTE_URL"
+  git fetch "$REMOTE_NAME"
+  git reset --hard "$REMOTE_NAME/$BRANCH"
+else
+  echo ">> Initializing git and pulling from remote..."
+  git init
+  git remote add "$REMOTE_NAME" "$REMOTE_URL"
+  git fetch "$REMOTE_NAME"
+  git checkout -f -B "$BRANCH" "$REMOTE_NAME/$BRANCH"
+fi
+
+# Restore machine name (may have been overwritten by pull)
+echo "$MACHINE_NAME" > "$WB_DIR/.machine-name"
+
+# === Step 6: Make scripts executable ===
+chmod +x "$WB_DIR/auto-sync.sh" 2>/dev/null || true
+chmod +x "$WB_DIR/start-sync-daemon.sh" 2>/dev/null || true
+chmod +x "$WB_DIR/machine-status.sh" 2>/dev/null || true
+
+# === Step 7: Register in machines.json ===
+PYTHON=""
+for p in \
+  "$WB_DIR/binaries/python/versions/3.13.12/bin/python3" \
+  "$WB_DIR/binaries/python/versions/3.12"*/bin/python3 \
+  /usr/local/bin/python3 \
+  /opt/homebrew/bin/python3 \
+  /usr/bin/python3; do
+  [ -x "$p" ] 2>/dev/null && PYTHON="$p" && break
+done
+
+if [ -n "$PYTHON" ]; then
+  "$PYTHON" -c "
+import json, os, datetime
+wb = os.path.expanduser('~/.workbuddy')
+reg_path = os.path.join(wb, 'machines.json')
+name = open(os.path.join(wb, '.machine-name')).read().strip()
+host = os.uname().nodename
+now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+try:
+    with open(reg_path) as f:
+        reg = json.load(f)
+except:
+    reg = {'machines': []}
+
+machines = reg.get('machines', [])
+found = False
+for m in machines:
+    if m.get('name') == name or m.get('hostname') == host:
+        m['hostname'] = host
+        m['last_sync'] = now
+        m['status'] = 'active'
+        found = True
+        break
+if not found:
+    machines.append({
+        'name': name,
+        'hostname': host,
+        'registered': now,
+        'last_sync': now,
+        'status': 'active'
+    })
+
+reg['machines'] = machines
+with open(reg_path, 'w') as f:
+    json.dump(reg, f, indent=2, ensure_ascii=False)
+print(f'>> Registered in machines.json as \"{name}\"')
+" 2>/dev/null
+else
+  echo ">> [!] Python not found — could not register in machines.json"
+fi
+
+# === Step 8: Set up aliases + terminal hook ===
+echo ""
+echo ">> Setting up aliases + terminal auto-sync..."
+PROFILE="$HOME/.bash_profile"
+if [ ! -f "$PROFILE" ]; then
+  PROFILE="$HOME/.zshrc"
+fi
+
+if grep -q "wbsync" "$PROFILE" 2>/dev/null; then
+  echo ">> Aliases already present, skipping"
+else
+  cat >> "$PROFILE" << 'PROFILE_EOF'
+
+# WorkBuddy multi-machine sync shortcuts
+alias wbsync='cd ~/.workbuddy && git add -A && git commit -m "sync $(date +%m%d-%H%M) from $(cat ~/.workbuddy/.machine-name 2>/dev/null || echo $(hostname))" && git push REMOTE main'
+alias wbpull='cd ~/.workbuddy && git pull --rebase REMOTE main'
+alias wbstatus='bash ~/.workbuddy/machine-status.sh'
+
+# WorkBuddy auto-sync — daemon keepalive + sync on terminal open
+if [ -f ~/.workbuddy/start-sync-daemon.sh ]; then
+  bash ~/.workbuddy/start-sync-daemon.sh 2>/dev/null
+fi
+if [ -t 1 ] && [ -f ~/.workbuddy/auto-sync.sh ]; then
+  _wb_now=$(date +%s)
+  _wb_last=$(cat ~/.workbuddy/.last-auto-sync 2>/dev/null || echo 0)
+  if [ $((_wb_now - _wb_last)) -gt 300 ]; then
+    bash ~/.workbuddy/auto-sync.sh >/dev/null 2>&1 &
+    echo $_wb_now > ~/.workbuddy/.last-auto-sync
+  fi
+  unset _wb_now _wb_last
+fi
+PROFILE_EOF
+
+  # Replace REMOTE placeholder with actual remote name
+  sed -i.bak "s/REMOTE/$REMOTE_NAME/g" "$PROFILE" 2>/dev/null || \
+    sed -i '' "s/REMOTE/$REMOTE_NAME/g" "$PROFILE" 2>/dev/null
+  rm -f "$PROFILE.bak" 2>/dev/null
+
+  echo ">> Added to $PROFILE"
+fi
+
+# === Step 9: Start daemon ===
+echo ""
+echo ">> Starting background sync daemon..."
+bash "$WB_DIR/start-sync-daemon.sh" 2>/dev/null
+sleep 1
+_wb_pid=$(cat "$WB_DIR/.sync-daemon.pid" 2>/dev/null)
+if [ -n "$_wb_pid" ] && kill -0 "$_wb_pid" 2>/dev/null; then
+  echo ">> [OK] Background sync daemon started (PID: $_wb_pid)"
+else
+  echo ">> [!] Daemon not started, will auto-retry when terminal opens"
+fi
+
+# === Step 10: Push registration to remote ===
+echo ""
+echo ">> Pushing machine registration to remote..."
+cd "$WB_DIR"
+git add -A
+git commit -m "register: $MACHINE_NAME ($(hostname))" 2>/dev/null || true
+git push "$REMOTE_NAME" "$BRANCH" 2>/dev/null || true
+
+echo ""
+echo "========================================"
+echo "  Machine '$MACHINE_NAME' setup complete!"
+echo "========================================"
+echo ""
+echo "Verify:"
+echo "  cat ~/.workbuddy/SOUL.md       # should show synced content"
+echo "  ls ~/.workbuddy/skills/        # should show synced skills"
+echo "  bash ~/.workbuddy/machine-status.sh   # see all machines"
+echo ""
+echo "Now fully automatic:"
+echo "  - Background sync every 5 minutes"
+echo "  - Terminal open also triggers sync + daemon keepalive"
+echo "  - Manual: wbsync (push) / wbpull (pull) / wbstatus (status)"
+echo ""
+echo "If backed up old config: ls ~/.workbuddy.backup.*"
+echo ""
