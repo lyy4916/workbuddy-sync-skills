@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# WorkBuddy Mac B One-Click Setup Script (GitHub Sync)
+#
+# TEMPLATE — replace these placeholders before use:
+#   <GITHUB_USERNAME>  → e.g. lyy4916
+#   <GITHUB_TOKEN>     → e.g. gho_xxxxxxxxxxxxxxxxxxxx
+#   <GITHUB_REPO>      → e.g. https://github.com/lyy4916/wb-sync.git
+#
+# Usage (on Mac B):
+#   1. Install WorkBuddy, launch once, then quit (to create ~/.workbuddy/)
+#   2. Run: bash wb-setup-mac-b.sh
+#
+# Prerequisite: Mac B can reach github.com
+#
+
+set -e
+
+GITHUB_USERNAME="<GITHUB_USERNAME>"
+GITHUB_TOKEN="<GITHUB_TOKEN>"
+GITHUB_REPO="<GITHUB_REPO>"
+
+WB_DIR="$HOME/.workbuddy"
+
+# Check ~/.workbuddy exists
+if [ ! -d "$WB_DIR" ]; then
+  echo "ERROR: ~/.workbuddy does not exist"
+  echo "Install WorkBuddy first, launch it once, then quit and run this script"
+  exit 1
+fi
+
+# Backup existing config (if any)
+if [ -f "$WB_DIR/SOUL.md" ] || [ -f "$WB_DIR/MEMORY.md" ]; then
+  BACKUP_DIR="$WB_DIR.backup.$(date +%Y%m%d%H%M%S)"
+  echo ">> Backing up existing config to $BACKUP_DIR ..."
+  mkdir -p "$BACKUP_DIR"
+  for f in SOUL.md IDENTITY.md USER.md MEMORY.md mcp.json settings.json skills; do
+    if [ -e "$WB_DIR/$f" ]; then
+      cp -r "$WB_DIR/$f" "$BACKUP_DIR/"
+    fi
+  done
+  echo ">> Backup complete"
+fi
+
+# Configure git (if not already set)
+if [ -z "$(git config --global user.name)" ]; then
+  git config --global user.name "$(whoami)"
+  git config --global user.email "$(whoami)@workbuddy.local"
+  git config --global init.defaultBranch main
+fi
+
+# Store GitHub credentials (HTTPS passwordless)
+echo "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com" > "$HOME/.git-credentials"
+chmod 600 "$HOME/.git-credentials"
+git config --global credential.helper store
+echo ">> GitHub credentials stored"
+
+# Initialize git and pull from GitHub
+cd "$WB_DIR"
+
+if [ -d ".git" ]; then
+  echo ">> Git repo exists, switching remote to GitHub..."
+  git remote remove origin 2>/dev/null || true
+  git remote remove icloud 2>/dev/null || true
+  git remote add origin "$GITHUB_REPO"
+  git fetch origin
+  git reset --hard origin/main
+else
+  echo ">> Initializing git and pulling from GitHub..."
+  git init
+  git remote add origin "$GITHUB_REPO"
+  git fetch origin
+  git checkout -f -B main origin/main
+fi
+
+chmod +x "$WB_DIR/auto-sync.sh" 2>/dev/null || true
+
+echo ""
+echo ">> Setting up aliases + terminal auto-sync..."
+PROFILE="$HOME/.bash_profile"
+if [ ! -f "$PROFILE" ]; then
+  PROFILE="$HOME/.zshrc"
+fi
+
+# Write aliases + auto-sync hook (skip if already present)
+if grep -q "wbsync" "$PROFILE" 2>/dev/null; then
+  echo ">> Aliases already present, skipping"
+else
+  cat >> "$PROFILE" << 'PROFILE_EOF'
+
+# WorkBuddy multi-device sync shortcuts
+alias wbsync='cd ~/.workbuddy && git add -A && git commit -m "sync $(date +%m%d-%H%M)" && git push origin main'
+alias wbpull='cd ~/.workbuddy && git pull origin main'
+
+# WorkBuddy auto-sync — daemon keepalive + sync on terminal open
+if [ -f ~/.workbuddy/start-sync-daemon.sh ]; then
+  bash ~/.workbuddy/start-sync-daemon.sh 2>/dev/null
+fi
+if [ -t 1 ] && [ -f ~/.workbuddy/auto-sync.sh ]; then
+  _wb_now=$(date +%s)
+  _wb_last=$(cat ~/.workbuddy/.last-auto-sync 2>/dev/null || echo 0)
+  if [ $((_wb_now - _wb_last)) -gt 300 ]; then
+    bash ~/.workbuddy/auto-sync.sh >/dev/null 2>&1 &
+    echo $_wb_now > ~/.workbuddy/.last-auto-sync
+  fi
+  unset _wb_now _wb_last
+fi
+PROFILE_EOF
+  echo ">> Added to $PROFILE"
+fi
+
+echo ""
+echo ">> Starting background sync daemon..."
+chmod +x "$WB_DIR/start-sync-daemon.sh" 2>/dev/null
+bash "$WB_DIR/start-sync-daemon.sh" 2>/dev/null
+sleep 1
+_wb_pid=$(cat "$WB_DIR/.sync-daemon.pid" 2>/dev/null)
+if [ -n "$_wb_pid" ] && kill -0 "$_wb_pid" 2>/dev/null; then
+  echo ">> [OK] Background sync daemon started (PID: $_wb_pid)"
+else
+  echo ">> [!] Daemon not started, will auto-retry when terminal opens"
+fi
+
+echo ""
+echo "========================================"
+echo "  Mac B setup complete!"
+echo "========================================"
+echo ""
+echo "Verify:"
+echo "  cat ~/.workbuddy/SOUL.md   # should show Mac A content"
+echo "  ls ~/.workbuddy/skills/    # should show synced skills"
+echo ""
+echo "Now fully automatic:"
+echo "  - Background sync every 5 minutes (GitHub)"
+echo "  - Terminal open also triggers sync + daemon keepalive"
+echo "  - Manual: wbsync (push) / wbpull (pull)"
+echo ""
+echo "If backed up old config: ls ~/.workbuddy.backup.*"
+echo ""
